@@ -118,8 +118,7 @@ def preprocess(dataset, K):
 
     print(f"Users with LOO applied: {used_users}, users skipped (deg=1): {skipped_users}")
     print(f"Final: train={len(train)}, test={len(test)}")
-
-    os.makedirs(f"processed/{dataset}", exist_ok=True)
+    os.makedirs(f"processed", exist_ok=True)
     train.to_csv(f"processed/{dataset}_{K}core_train.csv", index=False)
     test.to_csv(f"processed/{dataset}_{K}core_test.csv", index=False)
 

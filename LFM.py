@@ -236,8 +236,8 @@ def main():
     set_seed(args.seed)
 
 
-    train_df = pd.read_csv(f"data/{args.dataset}/{args.dataset}_10core_train.csv")
-    test_df = pd.read_csv(f"data/{args.dataset}/{args.dataset}_10core_test.csv")
+    train_df = pd.read_csv(f"data/processed/{args.dataset}_10core_train.csv")
+    test_df = pd.read_csv(f"data/processed/{args.dataset}_10core_test.csv")
 
     train_df, valid_df = train_test_split(train_df, test_size=args.valid_ratio, random_state=args.seed)
 
