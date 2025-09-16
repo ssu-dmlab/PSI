@@ -1,0 +1,16 @@
+slurm*
+__pycache__
+.vscode
+.DS_Store
+.idea
+.pytest_cache
+.pytest_cache
+.sh
+*.sh
+processed/
+*.csv
+*.dat
+*.txt
+amazon-book/
+*.pt
+*.ipynb
