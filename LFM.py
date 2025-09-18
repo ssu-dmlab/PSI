@@ -231,6 +231,7 @@ def main():
     parser.add_argument("--valid_ratio", type=float, default=0.1)
     parser.add_argument("--test_ratio", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
+    parser.add_argument("--regression", type=int, default=0, help="whether to use regression or not")
     args = parser.parse_args()
 
     set_seed(args.seed)
