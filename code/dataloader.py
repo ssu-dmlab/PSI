@@ -257,8 +257,11 @@ class Loader(BasicDataset):
         with open(test_file) as f:
             for l in f.readlines():
                 if len(l) > 0:
-                    l = l.strip('\n').split(' ')
+                    # l = l.strip('\n').split(' ')
+                    l = l.strip().split(' ')
                     items = [int(i) for i in l[1:]]
+                    if len(items) == 0:
+                        continue
                     uid = int(l[0])
                     testUniqueUsers.append(uid)
                     testUser.extend([uid] * len(items))

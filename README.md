@@ -10,10 +10,6 @@ run LightGCN on **gowalla**, **amazon-book** dataset:
 
 `python main.py --decay=1e-4 --lr=0.001 --layer=3 --seed=2020 --dataset="amazon-book" --topks="[20]" --recdim=64`
 
-amazon-book bug
-
-test.txt에 user id만 있는 line이 4개 있어서 제대로 처리 안됨 (line:13648, 41589, 50736, 52234)
-data preprocessing 잘못한 듯
 
 - log output
 
