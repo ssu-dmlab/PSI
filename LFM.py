@@ -22,6 +22,26 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score
 from tqdm import tqdm
 
+
+# -------------------------
+# Global Settings
+# -------------------------
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset", type=str, required=False, help="Dataset name")
+parser.add_argument("--dim", type=int, default=64)
+parser.add_argument("--batch_size", type=int, default=4096)
+parser.add_argument("--epochs", type=int, default=50)
+parser.add_argument("--lr", type=float, default=1e-3)
+parser.add_argument("--l2", type=float, default=1e-5)
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+parser.add_argument("--valid_ratio", type=float, default=0.1)
+parser.add_argument("--test_ratio", type=float, default=0.1)
+parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
+parser.add_argument("--implicit", action="store_true", help="whether to use implicit feedback")
+parser.add_argument("--pos_threshold", type=float, default=4.0, help="rating >= threshold is positive in implicit mode")
+args = parser.parse_args()
+
 # -------------------------
 # Utilities
 # -------------------------
@@ -114,20 +134,21 @@ def train_one_epoch(
     opt: torch.optim.Optimizer,
     device: torch.device,
     l2_reg: float = 1e-5,
+    implicit: bool = True,
 ):
     model.train()
     total_loss = 0.0
-    bce_loss = nn.BCEWithLogitsLoss()
+    loss_fn = nn.BCEWithLogitsLoss() if implicit else nn.MSELoss()
     for u, i, r in loader:
         u, i, r = u.to(device), i.to(device), r.to(device)
-        logits = model(u, i)
-        bce = bce_loss(logits, r)
+        out = model(u, i)
+        pred_loss = loss_fn(out, r)
         # L2 on embeddings only (common choice)
         l2 = (
             model.user_factors(u).pow(2).sum()
             + model.item_factors(i).pow(2).sum()
         ) / u.size(0)
-        loss = bce + l2_reg * l2
+        loss = pred_loss + l2_reg * l2
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -136,49 +157,55 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, float]:
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, implicit: bool = True) -> Dict[str, float]:
     model.eval()
-    all_logits, all_labels = [], []
+    all_out, all_target = [], []
     for u, i, r in loader:
         u, i, r = u.to(device), i.to(device), r.to(device)
-        logits = model(u, i)
-        all_logits.append(logits.detach().cpu())
-        all_labels.append(r.detach().cpu())
-    logits = torch.cat(all_logits).numpy()
-    labels = torch.cat(all_labels).numpy()
-
-    # Probabilities for metrics
-    probs = 1.0 / (1.0 + np.exp(-logits))
-    preds = (probs >= 0.5).astype(np.int32)
+        out = model(u, i)
+        all_out.append(out.detach().cpu())
+        all_target.append(r.detach().cpu())
+    out = torch.cat(all_out).numpy()
+    target = torch.cat(all_target).numpy()
 
     metrics: Dict[str, float] = {}
-    # Some metrics require both classes present
-    has_both = (np.unique(labels).shape[0] == 2)
-    if has_both:
-        try:
-            metrics["ROC_AUC"] = float(roc_auc_score(labels, probs))
-        except Exception:
+    if implicit:
+        probs = 1.0 / (1.0 + np.exp(-out))
+        preds = (probs >= 0.5).astype(np.int32)
+        has_both = (np.unique(target).shape[0] == 2)
+        if has_both:
+            try:
+                metrics["ROC_AUC"] = float(roc_auc_score(target, probs))
+            except Exception:
+                metrics["ROC_AUC"] = float("nan")
+            try:
+                metrics["PR_AUC"] = float(average_precision_score(target, probs))
+            except Exception:
+                metrics["PR_AUC"] = float("nan")
+        else:
             metrics["ROC_AUC"] = float("nan")
-        try:
-            metrics["PR_AUC"] = float(average_precision_score(labels, probs))
-        except Exception:
             metrics["PR_AUC"] = float("nan")
+        metrics["ACC"] = float(accuracy_score(target, preds))
+        eps = 1e-12
+        bce = -(
+            target * np.log(probs + eps) + (1 - target) * np.log(1 - probs + eps)
+        ).mean()
+        metrics["BCE"] = float(bce)
     else:
-        metrics["ROC_AUC"] = float("nan")
-        metrics["PR_AUC"] = float("nan")
-
-    metrics["ACC"] = float(accuracy_score(labels, preds))
-    # Optional: report BCE as well
-    eps = 1e-12
-    bce = -(
-        labels * np.log(probs + eps) + (1 - labels) * np.log(1 - probs + eps)
-    ).mean()
-    metrics["BCE"] = float(bce)
+        pred = out
+        diff = pred - target
+        metrics["MSE"] = float(np.mean(diff ** 2))
+        metrics["RMSE"] = float(np.sqrt(metrics["MSE"]))
+        metrics["MAE"] = float(np.mean(np.abs(diff)))
     return metrics
 
 
 def prepare_tensors(
-    df_train: pd.DataFrame, df_valid: pd.DataFrame, df_test: pd.DataFrame
+    df_train: pd.DataFrame,
+    df_valid: pd.DataFrame,
+    df_test: pd.DataFrame,
+    implicit: bool,
+    pos_threshold: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int, float]:
     # Fit mappings on TRAIN ONLY, then map valid/test; unseen ids in valid/test are dropped
     u_codes, u_map = factorize_series(df_train["user"])
@@ -195,49 +222,48 @@ def prepare_tensors(
     valid_m = map_or_drop(df_valid)
     test_m = map_or_drop(df_test)
 
-    # Binary prior for bias initialization: use train positive rate
-    pos_rate = float(train_m["label"].mean()) if len(train_m) else 0.5
-    pos_rate = min(max(pos_rate, 1e-6), 1.0 - 1e-6)
-    global_logit = float(math.log(pos_rate / (1.0 - pos_rate)))
+    if implicit:
+        train_m["label"] = (train_m["rating"] >= pos_threshold).astype(np.float32)
+        valid_m["label"] = (valid_m["rating"] >= pos_threshold).astype(np.float32) if len(valid_m) else np.array([], dtype=np.float32)
+        test_m["label"] = (test_m["rating"] >= pos_threshold).astype(np.float32) if len(test_m) else np.array([], dtype=np.float32)
+        # Binary prior for bias initialization: use train positive rate
+        pos_rate = float(train_m["label"].mean()) if len(train_m) else 0.5
+        pos_rate = min(max(pos_rate, 1e-6), 1.0 - 1e-6)
+        global_bias_value = float(math.log(pos_rate / (1.0 - pos_rate)))
+        r_key = "label"
+    else:
+        # Explicit rating: use mean rating as bias init
+        global_bias_value = float(train_m["rating"].mean()) if len(train_m) else 0.0
+        r_key = "rating"
 
     u_train = train_m["u"].to_numpy(np.int64)
     i_train = train_m["i"].to_numpy(np.int64)
-    r_train = train_m["label"].to_numpy(np.float32)
+    r_train = train_m[r_key].to_numpy(np.float32)
 
     u_valid = valid_m["u"].to_numpy(np.int64)
     i_valid = valid_m["i"].to_numpy(np.int64)
-    r_valid = valid_m["label"].to_numpy(np.float32)
+    r_valid = valid_m[r_key].to_numpy(np.float32) if len(valid_m) else np.array([], dtype=np.float32)
 
     u_test = test_m["u"].to_numpy(np.int64)
     i_test = test_m["i"].to_numpy(np.int64)
-    r_test = test_m["label"].to_numpy(np.float32)
+    r_test = test_m[r_key].to_numpy(np.float32) if len(test_m) else np.array([], dtype=np.float32)
 
-    n_users = int(u_train.max()) + 1
-    n_items = int(i_train.max()) + 1
+    n_users = int(u_train.max()) + 1 if len(u_train) else 0
+    n_items = int(i_train.max()) + 1 if len(i_train) else 0
 
-    return u_train, i_train, r_train, u_valid, i_valid, r_valid, u_test, i_test, r_test, n_users, n_items, global_logit
+    return u_train, i_train, r_train, u_valid, i_valid, r_valid, u_test, i_test, r_test, n_users, n_items, global_bias_value
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, required=False, help="Dataset name")
-    parser.add_argument("--dim", type=int, default=64)
-    parser.add_argument("--batch_size", type=int, default=4096)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--l2", type=float, default=1e-5)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--valid_ratio", type=float, default=0.1)
-    parser.add_argument("--test_ratio", type=float, default=0.1)
-    parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
-    args = parser.parse_args()
+    train_path = f"data/{args.dataset}/train_rating.txt"
+    test_path = f"data/{args.dataset}/test_rating.txt"
+    
+    # 데이터는 (user, item, rating) 공백 구분 파일이라고 가정
+    train_df = pd.read_table(train_path, header=None, names=["user", "item", "rating"], delim_whitespace=True)
+    test_df = pd.read_table(test_path, header=None, names=["user", "item", "rating"], delim_whitespace=True)
 
-    set_seed(args.seed)
-
-
-    train_df = pd.read_csv(f"data/processed/{args.dataset}_10core_train.csv")
-    test_df = pd.read_csv(f"data/processed/{args.dataset}_10core_test.csv")
+    # train_df = pd.read_csv(f"data/processed/{args.dataset}_10core_train.csv")
+    # test_df = pd.read_csv(f"data/processed/{args.dataset}_10core_test.csv")
 
     train_df, valid_df = train_test_split(train_df, test_size=args.valid_ratio, random_state=args.seed)
 
@@ -246,8 +272,8 @@ def main():
         u_tr, i_tr, r_tr,
         u_va, i_va, r_va,
         u_te, i_te, r_te,
-        n_users, n_items, global_logit
-    ) = prepare_tensors(train_df, valid_df, test_df)
+        n_users, n_items, global_bias_value
+    ) = prepare_tensors(train_df, valid_df, test_df, implicit=args.implicit, pos_threshold=args.pos_threshold)
 
     print("Load datasets...")
     # Datasets / loaders
@@ -262,27 +288,37 @@ def main():
     # Model / optim
     device = torch.device(args.device)
     model = MFWithBias(n_users, n_items, dim=args.dim).to(device)
-    model.global_bias.data.fill_(global_logit)
+    model.global_bias.data.fill_(global_bias_value)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    # Train loop with early stopping on valid ROC-AUC (maximize)
-    best_score = -float("inf")
+    # Train loop with early stopping
+    best_score = (-float("inf") if args.implicit else float("inf"))
     best_state = None
     patience = args.patience
     no_improve = 0
     print("Training...")
     for epoch in tqdm(range(1, args.epochs + 1)):
-        train_loss = train_one_epoch(model, train_loader, opt, device, l2_reg=args.l2)
+        train_loss = train_one_epoch(model, train_loader, opt, device, l2_reg=args.l2, implicit=args.implicit)
         if valid_loader:
-            metrics = evaluate(model, valid_loader, device)
-            val_auc = metrics.get("ROC_AUC", float("nan"))
-            val_pr = metrics.get("PR_AUC", float("nan"))
-            val_acc = metrics.get("ACC", float("nan"))
-            val_bce = metrics.get("BCE", float("nan"))
-            print(f"[Epoch {epoch:02d}] train_BCE={train_loss:.5f}  val_ROC_AUC={val_auc:.5f}  val_PR_AUC={val_pr:.5f}  val_ACC={val_acc:.4f}  val_BCE={val_bce:.5f}")
-            # Choose early stop metric: prefer ROC_AUC if available, else ACC
-            cur_score = val_auc if not math.isnan(val_auc) else val_acc
-            if cur_score > best_score + 1e-6:
+            metrics = evaluate(model, valid_loader, device, implicit=args.implicit)
+            if args.implicit:
+                val_auc = metrics.get("ROC_AUC", float("nan"))
+                val_pr = metrics.get("PR_AUC", float("nan"))
+                val_acc = metrics.get("ACC", float("nan"))
+                val_bce = metrics.get("BCE", float("nan"))
+                print(f"[Epoch {epoch:02d}] train_BCE={train_loss:.5f}  val_ROC_AUC={val_auc:.5f}  val_PR_AUC={val_pr:.5f}  val_ACC={val_acc:.4f}  val_BCE={val_bce:.5f}")
+                # early stop: maximize ROC_AUC (fallback to ACC)
+                cur_score = val_auc if not math.isnan(val_auc) else val_acc
+                improved = cur_score > best_score + 1e-6
+            else:
+                val_rmse = metrics.get("RMSE", float("nan"))
+                val_mae = metrics.get("MAE", float("nan"))
+                val_mse = metrics.get("MSE", float("nan"))
+                print(f"[Epoch {epoch:02d}] train_MSE={train_loss:.5f}  val_RMSE={val_rmse:.5f}  val_MAE={val_mae:.5f}  val_MSE={val_mse:.5f}")
+                # early stop: minimize RMSE
+                cur_score = val_rmse
+                improved = cur_score < best_score - 1e-6
+            if improved:
                 best_score = cur_score
                 best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
                 no_improve = 0
@@ -292,25 +328,34 @@ def main():
                     print(f"[EarlyStop] No improvement for {patience} epochs.")
                     break
         else:
-            print(f"[Epoch {epoch:02d}] train_BCE={train_loss:.5f}")
+            if args.implicit:
+                print(f"[Epoch {epoch:02d}] train_BCE={train_loss:.5f}")
+            else:
+                print(f"[Epoch {epoch:02d}] train_MSE={train_loss:.5f}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
 
     # Test
     if test_loader:
-        test_metrics = evaluate(model, test_loader, device)
-        msg = (
-            f"[Test] ROC_AUC={test_metrics['ROC_AUC']:.5f}  "
-            f"PR_AUC={test_metrics['PR_AUC']:.5f}  "
-            f"ACC={test_metrics['ACC']:.4f}  BCE={test_metrics['BCE']:.5f}"
-        )
+        test_metrics = evaluate(model, test_loader, device, implicit=args.implicit)
+        if args.implicit:
+            msg = (
+                f"[Test] ROC_AUC={test_metrics['ROC_AUC']:.5f}  "
+                f"PR_AUC={test_metrics['PR_AUC']:.5f}  "
+                f"ACC={test_metrics['ACC']:.4f}  BCE={test_metrics['BCE']:.5f}"
+            )
+        else:
+            msg = (
+                f"[Test] RMSE={test_metrics['RMSE']:.5f}  "
+                f"MAE={test_metrics['MAE']:.5f}  MSE={test_metrics['MSE']:.5f}"
+            )
         print(msg)
     else:
         print("[Warn] No test set generated (too few interactions per user).")
 
     # Save model
-    out_path = os.path.splitext(os.path.basename(args.dataset))[0] + f".mf_dim{args.dim}.pt"
+    out_path = os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_dim{args.dim}.pt"
     torch.save({"state_dict": model.state_dict(), "n_users": n_users, "n_items": n_items, "dim": args.dim}, out_path)
     print(f"[OK] Saved model to {out_path}")
 
