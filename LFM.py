@@ -208,52 +208,49 @@ def prepare_tensors(
     pos_threshold: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int, float]:
     # Fit mappings on TRAIN ONLY, then map valid/test; unseen ids in valid/test are dropped
-    u_codes, u_map = factorize_series(df_train["user"])
-    i_codes, i_map = factorize_series(df_train["item"])
+    # u_codes, u_map = factorize_series(df_train["user"])
+    # i_codes, i_map = factorize_series(df_train["item"])
 
-    def map_or_drop(df: pd.DataFrame) -> pd.DataFrame:
-        mask = df["user"].isin(u_map.keys()) & df["item"].isin(i_map.keys())
-        d = df.loc[mask].copy()
-        d["u"] = d["user"].map(u_map).astype(np.int64)
-        d["i"] = d["item"].map(i_map).astype(np.int64)
-        return d
+    # def map_or_drop(df: pd.DataFrame) -> pd.DataFrame:
+    #     mask = df["user"].isin(u_map.keys()) & df["item"].isin(i_map.keys())
+    #     d = df.loc[mask].copy()
+    #     d["u"] = d["user"].map(u_map).astype(np.int64)
+    #     d["i"] = d["item"].map(i_map).astype(np.int64)
+    #     return d
 
-    before_train_m = df_train
-    before_valid_m = df_valid
-    before_test_m = df_test
+    # before_df_train = df_train
+    # before_df_valid = df_valid
+    # before_test_m = df_test
     
-    train_m = map_or_drop(df_train)
-    valid_m = map_or_drop(df_valid)
-    test_m = map_or_drop(df_test)
-    assert len(train_m) == len(df_train)
-    assert len(valid_m) == len(df_valid)
-    assert len(test_m) == len(df_test)
-    
+    # df_train = map_or_drop(df_train)
+    # df_valid = map_or_drop(df_valid)
+    # test_m = map_or_drop(df_test)
+    # assert len(df_train) == len(df_train)
     if implicit:
-        train_m["label"] = (train_m["rating"] >= pos_threshold).astype(np.float32)
-        valid_m["label"] = (valid_m["rating"] >= pos_threshold).astype(np.float32) if len(valid_m) else np.array([], dtype=np.float32)
-        test_m["label"] = (test_m["rating"] >= pos_threshold).astype(np.float32) if len(test_m) else np.array([], dtype=np.float32)
+        df_train["label"] = (df_train["rating"] >= pos_threshold).astype(np.float32)
+        df_valid["label"] = (df_valid["rating"] >= pos_threshold).astype(np.float32) if len(df_valid) else np.array([], dtype=np.float32)
+        df_test["label"] = (df_test["rating"] >= pos_threshold).astype(np.float32) if len(df_test) else np.array([], dtype=np.float32)
         # Binary prior for bias initialization: use train positive rate
-        pos_rate = float(train_m["label"].mean()) if len(train_m) else 0.5
+        pos_rate = float(df_train["label"].mean()) if len(df_train) else 0.5
         pos_rate = min(max(pos_rate, 1e-6), 1.0 - 1e-6)
         global_bias_value = float(math.log(pos_rate / (1.0 - pos_rate)))
         r_key = "label"
     else:
         # Explicit rating: use mean rating as bias init
-        global_bias_value = float(train_m["rating"].mean()) if len(train_m) else 0.0
+        global_bias_value = float(df_train["rating"].mean()) if len(df_train) else 0.0
         r_key = "rating"
 
-    u_train = train_m["u"].to_numpy(np.int64)
-    i_train = train_m["i"].to_numpy(np.int64)
-    r_train = train_m[r_key].to_numpy(np.float32)
+    u_train = df_train["u"].to_numpy(np.int64)
+    i_train = df_train["i"].to_numpy(np.int64)
+    r_train = df_train[r_key].to_numpy(np.float32)
 
-    u_valid = valid_m["u"].to_numpy(np.int64)
-    i_valid = valid_m["i"].to_numpy(np.int64)
-    r_valid = valid_m[r_key].to_numpy(np.float32) if len(valid_m) else np.array([], dtype=np.float32)
+    u_valid = df_valid["u"].to_numpy(np.int64)
+    i_valid = df_valid["i"].to_numpy(np.int64)
+    r_valid = df_valid[r_key].to_numpy(np.float32) if len(df_valid) else np.array([], dtype=np.float32)
 
-    u_test = test_m["u"].to_numpy(np.int64)
-    i_test = test_m["i"].to_numpy(np.int64)
-    r_test = test_m[r_key].to_numpy(np.float32) if len(test_m) else np.array([], dtype=np.float32)
+    u_test = df_test["u"].to_numpy(np.int64)
+    i_test = df_test["i"].to_numpy(np.int64)
+    r_test = df_test[r_key].to_numpy(np.float32) if len(df_test) else np.array([], dtype=np.float32)
 
     n_users = int(u_train.max()) + 1 if len(u_train) else 0
     n_items = int(i_train.max()) + 1 if len(i_train) else 0
@@ -284,7 +281,7 @@ def split_valid_with_min_counts(
     d["row_id"] = np.arange(len(d))
 
     # Initial per-user selection
-    valid_mask = np.zeros(len(d), dtype=bool)
+    df_validask = np.zeros(len(d), dtype=bool)
     user_groups = d.groupby("user").indices
     for user_id, row_indices in user_groups.items():
         n = len(row_indices)
@@ -294,11 +291,11 @@ def split_valid_with_min_counts(
         if take <= 0:
             continue
         chosen = rng.choice(row_indices, size=take, replace=False)
-        valid_mask[chosen] = True
+        df_validask[chosen] = True
 
     # Enforce item minima by moving back from valid -> train if needed
     item_counts = d["item"].value_counts()
-    valid_item_counts = d.loc[valid_mask, "item"].value_counts()
+    valid_item_counts = d.loc[df_validask, "item"].value_counts()
     # For items where train would drop below min, move back some rows
     items = item_counts.index.tolist()
     for item_id in items:
@@ -309,17 +306,17 @@ def split_valid_with_min_counts(
         if deficit <= 0:
             continue
         # Move back `deficit` rows for this item from valid to train (any rows)
-        item_valid_indices = d.index[(valid_mask) & (d["item"] == item_id)].to_numpy()
+        item_valid_indices = d.index[(df_validask) & (d["item"] == item_id)].to_numpy()
         if len(item_valid_indices) == 0:
             continue
         move_back_count = min(deficit, len(item_valid_indices))
         to_move = rng.choice(item_valid_indices, size=move_back_count, replace=False)
-        valid_mask[to_move] = False
+        df_validask[to_move] = False
         # update counts for subsequent iterations
         valid_item_counts[item_id] = int(valid_item_counts.get(item_id, 0)) - move_back_count
 
-    valid_df = d.loc[valid_mask].drop(columns=["row_id"]).reset_index(drop=True)
-    train_df = d.loc[~valid_mask].drop(columns=["row_id"]).reset_index(drop=True)
+    valid_df = d.loc[df_validask].drop(columns=["row_id"]).reset_index(drop=True)
+    train_df = d.loc[~df_validask].drop(columns=["row_id"]).reset_index(drop=True)
 
     return train_df, valid_df
 
