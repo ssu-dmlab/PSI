@@ -218,10 +218,17 @@ def prepare_tensors(
         d["i"] = d["item"].map(i_map).astype(np.int64)
         return d
 
+    before_train_m = df_train
+    before_valid_m = df_valid
+    before_test_m = df_test
+    
     train_m = map_or_drop(df_train)
     valid_m = map_or_drop(df_valid)
     test_m = map_or_drop(df_test)
-
+    assert len(train_m) == len(df_train)
+    assert len(valid_m) == len(df_valid)
+    assert len(test_m) == len(df_test)
+    
     if implicit:
         train_m["label"] = (train_m["rating"] >= pos_threshold).astype(np.float32)
         valid_m["label"] = (valid_m["rating"] >= pos_threshold).astype(np.float32) if len(valid_m) else np.array([], dtype=np.float32)
@@ -254,6 +261,68 @@ def prepare_tensors(
     return u_train, i_train, r_train, u_valid, i_valid, r_valid, u_test, i_test, r_test, n_users, n_items, global_bias_value
 
 
+def split_valid_with_min_counts(
+    df: pd.DataFrame,
+    valid_ratio: float,
+    seed: int,
+    min_train_per_user: int = 1,
+    min_train_per_item: int = 1,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Split df into (train_df, valid_df) such that:
+    - No user/item becomes cold in validation relative to train
+    - Train retains at least min_train_per_user per user and min_train_per_item per item
+    The procedure first selects validation candidates per-user proportionally,
+    then adjusts to satisfy item minima. If constraints prevent reaching the
+    exact ratio, a smaller validation set is returned.
+    """
+    if len(df) == 0 or valid_ratio <= 0.0:
+        return df.copy(), df.iloc[0:0].copy()
+
+    rng = np.random.RandomState(seed)
+    d = df.copy().reset_index(drop=True)
+    d["row_id"] = np.arange(len(d))
+
+    # Initial per-user selection
+    valid_mask = np.zeros(len(d), dtype=bool)
+    user_groups = d.groupby("user").indices
+    for user_id, row_indices in user_groups.items():
+        n = len(row_indices)
+        max_take = max(0, n - min_train_per_user)
+        take = int(round(n * valid_ratio))
+        take = min(take, max_take)
+        if take <= 0:
+            continue
+        chosen = rng.choice(row_indices, size=take, replace=False)
+        valid_mask[chosen] = True
+
+    # Enforce item minima by moving back from valid -> train if needed
+    item_counts = d["item"].value_counts()
+    valid_item_counts = d.loc[valid_mask, "item"].value_counts()
+    # For items where train would drop below min, move back some rows
+    items = item_counts.index.tolist()
+    for item_id in items:
+        total = int(item_counts.get(item_id, 0))
+        selected = int(valid_item_counts.get(item_id, 0))
+        train_left = total - selected
+        deficit = max(0, min_train_per_item - train_left)
+        if deficit <= 0:
+            continue
+        # Move back `deficit` rows for this item from valid to train (any rows)
+        item_valid_indices = d.index[(valid_mask) & (d["item"] == item_id)].to_numpy()
+        if len(item_valid_indices) == 0:
+            continue
+        move_back_count = min(deficit, len(item_valid_indices))
+        to_move = rng.choice(item_valid_indices, size=move_back_count, replace=False)
+        valid_mask[to_move] = False
+        # update counts for subsequent iterations
+        valid_item_counts[item_id] = int(valid_item_counts.get(item_id, 0)) - move_back_count
+
+    valid_df = d.loc[valid_mask].drop(columns=["row_id"]).reset_index(drop=True)
+    train_df = d.loc[~valid_mask].drop(columns=["row_id"]).reset_index(drop=True)
+
+    return train_df, valid_df
+
 def main():
     train_path = f"data/{args.dataset}/train_rating.txt"
     test_path = f"data/{args.dataset}/test_rating.txt"
@@ -265,7 +334,13 @@ def main():
     # train_df = pd.read_csv(f"data/processed/{args.dataset}_10core_train.csv")
     # test_df = pd.read_csv(f"data/processed/{args.dataset}_10core_test.csv")
 
-    train_df, valid_df = train_test_split(train_df, test_size=args.valid_ratio, random_state=args.seed)
+    train_df, valid_df = split_valid_with_min_counts(
+        train_df,
+        valid_ratio=args.valid_ratio,
+        seed=args.seed,
+        min_train_per_user=1,
+        min_train_per_item=1,
+    )
 
     # Prepare tensors/mappings
     (
