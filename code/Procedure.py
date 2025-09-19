@@ -30,7 +30,7 @@ def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=N
     
     with timer(name="Sample"):
         if world.config['use_lfm'] == 1:
-            S = utils.SoftMaxSample(dataset, lfm_ratings)
+            S = utils.SoftMaxSample_python(dataset, lfm_ratings) ## 실험을 위해 python으로 업데이트
         else:
             S = utils.UniformSample_original(dataset)
     users = torch.Tensor(S[:, 0]).long()
