@@ -22,36 +22,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score
 from tqdm import tqdm
 
-
-# -------------------------
-# Global Settings
-# -------------------------
-parser = argparse.ArgumentParser()
-parser.add_argument("--dataset", type=str, required=False, help="Dataset name")
-parser.add_argument("--dim", type=int, default=64)
-parser.add_argument("--batch_size", type=int, default=4096)
-parser.add_argument("--epochs", type=int, default=50)
-parser.add_argument("--lr", type=float, default=1e-3)
-parser.add_argument("--l2", type=float, default=1e-5)
-parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-parser.add_argument("--valid_ratio", type=float, default=0.1)
-parser.add_argument("--test_ratio", type=float, default=0.1)
-parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
-parser.add_argument("--implicit", action="store_true", help="whether to use implicit feedback")
-parser.add_argument("--pos_threshold", type=float, default=4.0, help="rating >= threshold is positive in implicit mode")
-
-# Grid search and regularization options
-parser.add_argument("--grid", action="store_true", help="run grid search over preset ranges")
-parser.add_argument("--dims", type=str, default="16,32", help="comma-separated embedding dims for grid")
-parser.add_argument("--lrs", type=str, default="3e-4,5e-4", help="comma-separated learning rates for grid")
-parser.add_argument("--l2s", type=str, default="1e-3,3e-3,1e-2", help="comma-separated L2 values for grid")
-parser.add_argument("--dropouts", type=str, default="0.0,0.2", help="comma-separated dropout rates for grid")
-parser.add_argument("--clip_output", action="store_true", help="clip predictions to rating range via sigmoid scaling")
-parser.add_argument("--rating_min", type=float, default=1.0, help="min rating for output clip")
-parser.add_argument("--rating_max", type=float, default=5.0, help="max rating for output clip")
-parser.add_argument("--save_best", action="store_true", help="save best model from grid search")
-args = parser.parse_args()
+from .model import MFWithBias
 
 # -------------------------
 # Utilities
@@ -95,47 +66,6 @@ class RatingsDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.u[idx], self.i[idx], self.r[idx]
-
-
-# -------------------------
-# Model
-# -------------------------
-class MFWithBias(nn.Module):
-    """
-    Rating_hat = mu + b_u + b_i + <P_u, Q_i>
-    where P: user embedding, Q: item embedding
-    """
-
-    def __init__(self, n_users: int, n_items: int, dim: int = 64, init_std: float = 0.01, dropout: float = 0.0, clip_output: bool = False, rating_min: float = 1.0, rating_max: float = 5.0):
-        super().__init__()
-        self.user_factors = nn.Embedding(n_users, dim)
-        self.item_factors = nn.Embedding(n_items, dim)
-        self.user_bias = nn.Embedding(n_users, 1)
-        self.item_bias = nn.Embedding(n_items, 1)
-        self.global_bias = nn.Parameter(torch.zeros(1))
-        self.dropout = nn.Dropout(p=dropout) if dropout and dropout > 0.0 else nn.Identity()
-        self.clip_output = clip_output
-        self.rating_min = rating_min
-        self.rating_max = rating_max
-        # init
-        nn.init.normal_(self.user_factors.weight, std=init_std)
-        nn.init.normal_(self.item_factors.weight, std=init_std)
-        nn.init.zeros_(self.user_bias.weight)
-        nn.init.zeros_(self.item_bias.weight)
-
-    def forward(self, u: torch.LongTensor, i: torch.LongTensor):
-        p_u = self.user_factors(u)          # (B, d)
-        q_i = self.item_factors(i)          # (B, d)
-        bu = self.user_bias(u).squeeze(-1)  # (B,)
-        bi = self.item_bias(i).squeeze(-1)  # (B,)
-        p_u = self.dropout(p_u)
-        q_i = self.dropout(q_i)
-        dot = (p_u * q_i).sum(dim=-1)       # (B,)
-        raw = self.global_bias + bu + bi + dot
-        if self.clip_output:
-            span = self.rating_max - self.rating_min
-            return self.rating_min + span * torch.sigmoid(raw)
-        return raw
 
 
 # -------------------------
@@ -351,6 +281,39 @@ def split_valid_with_min_counts(
     return train_df, valid_df
 
 def main():
+    # -------------------------
+    # Global Settings
+    # -------------------------
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, required=False, help="Dataset name")
+    parser.add_argument("--valid_ratio", type=float, default=0.1)
+    parser.add_argument("--test_ratio", type=float, default=0.1)
+
+    parser.add_argument("--dim", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--l2", type=float, default=1e-5)
+
+    parser.add_argument("--batch_size", type=int, default=4096)
+    parser.add_argument("--epochs", type=int, default=50)
+
+    parser.add_argument("--implicit", action="store_true", help="whether to use implicit feedback")
+    parser.add_argument("--pos_threshold", type=float, default=4.0, help="rating >= threshold is positive in implicit mode")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
+
+    # Grid search and regularization options
+    parser.add_argument("--grid", action="store_true", help="run grid search over preset ranges")
+    parser.add_argument("--dims", type=str, default="16,32", help="comma-separated embedding dims for grid")
+    parser.add_argument("--lrs", type=str, default="3e-4,5e-4", help="comma-separated learning rates for grid")
+    parser.add_argument("--l2s", type=str, default="1e-3,3e-3,1e-2", help="comma-separated L2 values for grid")
+    parser.add_argument("--dropouts", type=str, default="0.0,0.2", help="comma-separated dropout rates for grid")
+    parser.add_argument("--clip_output", action="store_true", help="clip predictions to rating range via sigmoid scaling")
+    parser.add_argument("--rating_min", type=float, default=1.0, help="min rating for output clip")
+    parser.add_argument("--rating_max", type=float, default=5.0, help="max rating for output clip")
+    parser.add_argument("--save_best", action="store_true", help="save best model from grid search")
+    args = parser.parse_args()
+
     train_path = f"data/{args.dataset}/train_rating.txt"
     test_path = f"data/{args.dataset}/test_rating.txt"
 
@@ -497,16 +460,20 @@ def main():
             print(f"\n[Best-Valid] RMSE={bv.get('RMSE', float('nan')):.5f} MAE={bv.get('MAE', float('nan')):.5f} MSE={bv.get('MSE', float('nan')):.5f}")
             print(f"[Best-Test ] RMSE={bt.get('RMSE', float('nan')):.5f} MAE={bt.get('MAE', float('nan')):.5f} MSE={bt.get('MSE', float('nan')):.5f}")
 
-        if args.save_best:
-            out_path = os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_grid_best.pt"
-            torch.save({
-                "state_dict": best["state"],
-                "n_users": n_users,
-                "n_items": n_items,
-                "dim": best_cfg["dim"],
-                "config": best_cfg,
-            }, out_path)
-            print(f"[OK] Saved best model to {out_path}")
+        
+        os.makedirs("LFM_checkpoints", exist_ok=True)
+        if args.implicit:
+            out_path = os.path.splitext("LFM_checkpoints/" + os.path.basename(args.dataset))[0] + f"_binary_grid_best_val{bv['ROC_AUC']:.4f}.pt"
+        else:
+            out_path = os.path.splitext("LFM_checkpoints/" + os.path.basename(args.dataset))[0] + f"_rating_grid_best_val{bv['RMSE']:.4f}.pt"
+        torch.save({
+            "state_dict": best["state"],
+            "n_users": n_users,
+            "n_items": n_items,
+            "dim": best_cfg["dim"],
+            "config": best_cfg,
+        }, out_path)
+        print(f"[OK] Saved best model to {out_path}")
     else:
         print("Training (single run)...")
         set_seed(args.seed)
@@ -527,11 +494,11 @@ def main():
             )
 
         os.makedirs("LFM_checkpoints", exist_ok=True)
-    out_path = os.path.join(
-        "LFM_checkpoints",
-        os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_dim{args.dim}.pt"
+        out_path = os.path.join(
+            "LFM_checkpoints",
+            os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_dim{args.dim}.pt"
         )
-    torch.save({"state_dict": state, "n_users": n_users, "n_items": n_items, "dim": args.dim}, out_path)
+        torch.save({"state_dict": state, "n_users": n_users, "n_items": n_items, "dim": args.dim}, out_path)
         print(f"[OK] Saved model to {out_path}")
 
 

@@ -13,7 +13,7 @@ print(">>SEED:", world.seed)
 # ==============================
 import register
 from register import dataset
-from LFM import MFWithBias
+from LFM.model import MFWithBias
 
 Recmodel = register.MODELS[world.model_name](world.config, dataset)
 Recmodel = Recmodel.to(world.device)
