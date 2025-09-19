@@ -16,3 +16,5 @@ __pycache__
 runs/
 checkpoints/
 .rendered*
+*.sbatch
+logs/

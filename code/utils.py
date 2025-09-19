@@ -38,8 +38,11 @@ class BPRLoss:
         self.lr = config['lr']
         self.opt = optim.Adam(recmodel.parameters(), lr=self.lr)
 
-    def stageOne(self, users, pos, neg):
-        loss, reg_loss = self.model.bpr_loss(users, pos, neg)
+    def stageOne(self, users, pos, neg, lfm_rating=None):
+        if lfm_rating is not None:
+            loss, reg_loss = self.model.bpr_loss(users, pos, neg, lfm_rating)
+        else:
+            loss, reg_loss = self.model.bpr_loss(users, pos, neg)
         reg_loss = reg_loss*self.weight_decay
         loss = loss + reg_loss
 
@@ -109,7 +112,7 @@ def getFileName():
     if world.model_name == 'mf':
         file = f"mf-{world.dataset}-{world.config['latent_dim_rec']}.pth.tar"
     elif world.model_name == 'lgn':
-        file = f"lgn-{world.dataset}-{world.config['lightGCN_n_layers']}-{world.config['latent_dim_rec']}.pth.tar"
+        file = f"lgn-{world.dataset}-{world.config['lightGCN_n_layers']}-{world.config['latent_dim_rec']}-lfm_{bool(world.config['use_lfm'])}.pth.tar"
     return os.path.join(world.FILE_PATH,file)
 
 def minibatch(*tensors, **kwargs):

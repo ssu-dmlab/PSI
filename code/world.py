@@ -46,6 +46,7 @@ config['decay'] = args.decay
 config['pretrain'] = args.pretrain
 config['A_split'] = False
 config['bigdata'] = False
+config['use_lfm'] = args.use_lfm
 
 GPU = torch.cuda.is_available()
 device = torch.device('cuda' if GPU else "cpu")
@@ -75,7 +76,8 @@ simplefilter(action="ignore", category=FutureWarning)
 
 
 def cprint(words : str):
-    print(f"\033[0;30;43m{words}\033[0m")
+    # print(f"\033[0;30;43m{words}\033[0m")
+    print(words)
 
 logo = r"""
 ██╗      ██████╗ ███╗   ██╗

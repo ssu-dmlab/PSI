@@ -13,6 +13,7 @@ print(">>SEED:", world.seed)
 # ==============================
 import register
 from register import dataset
+from LFM import MFWithBias
 
 Recmodel = register.MODELS[world.model_name](world.config, dataset)
 Recmodel = Recmodel.to(world.device)
@@ -28,6 +29,22 @@ if world.LOAD:
         print(f"{weight_file} not exists, start from beginning")
 Neg_k = 1
 
+# Load pretrained LFM
+if world.config['use_lfm'] == 1:
+    print("Loading pretrained LFM...")
+    lfm_ckpt_path = "LFM_checkpoints/amazon-book_False_dim64.pt"
+    lfm_ckpt = torch.load(lfm_ckpt_path, map_location=world.device)
+    
+    lfm_model = MFWithBias(
+        n_users=lfm_ckpt['n_users'],
+        n_items=lfm_ckpt['n_items'],
+        dim=lfm_ckpt['dim']
+    ).to(world.device)
+    lfm_model.load_state_dict(lfm_ckpt['state_dict'])
+    lfm_model.eval()
+else:
+    lfm_model = None
+
 # init tensorboard
 if world.tensorboard:
     w : SummaryWriter = SummaryWriter(
@@ -39,12 +56,13 @@ else:
 
 try:
     for epoch in range(world.TRAIN_epochs):
-        start = time.time()
         if epoch %10 == 0:
             cprint("[TEST]")
             Procedure.Test(dataset, Recmodel, epoch, w, world.config['multicore'])
-        output_information = Procedure.BPR_train_original(dataset, Recmodel, bpr, epoch, neg_k=Neg_k,w=w)
-        print(f'EPOCH[{epoch+1}/{world.TRAIN_epochs}] {output_information}')
+        with utils.timer(name="Train"):
+            output_information = Procedure.BPR_train_original(dataset, Recmodel, bpr, epoch, neg_k=Neg_k,w=w, lfm_model=lfm_model)
+        print(f'EPOCH[{epoch+1}/{world.TRAIN_epochs}] {output_information}-{utils.timer.dict()}')
+        utils.timer.zero()
         torch.save(Recmodel.state_dict(), weight_file)
 finally:
     if world.tensorboard:

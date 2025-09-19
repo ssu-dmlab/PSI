@@ -24,53 +24,6 @@ from tqdm import tqdm
 
 
 # -------------------------
-# Global Settings
-# -------------------------
-parser = argparse.ArgumentParser()
-parser.add_argument("--dataset", type=str, required=False, help="Dataset name")
-parser.add_argument("--dim", type=int, default=64)
-parser.add_argument("--batch_size", type=int, default=4096)
-parser.add_argument("--epochs", type=int, default=50)
-parser.add_argument("--lr", type=float, default=1e-3)
-parser.add_argument("--l2", type=float, default=1e-5)
-parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-parser.add_argument("--valid_ratio", type=float, default=0.1)
-parser.add_argument("--test_ratio", type=float, default=0.1)
-parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
-parser.add_argument("--implicit", action="store_true", help="whether to use implicit feedback")
-parser.add_argument("--pos_threshold", type=float, default=4.0, help="rating >= threshold is positive in implicit mode")
-args = parser.parse_args()
-
-# -------------------------
-# Utilities
-# -------------------------
-def set_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
-def factorize_series(s: pd.Series) -> Tuple[np.ndarray, Dict]:
-    """Return integer codes and mapping dict {original_id -> code}."""
-    codes, uniques = pd.factorize(s, sort=True)
-    mapping = {k: int(v) for v, k in enumerate(uniques.tolist())}
-    return codes.astype(np.int64), mapping
-
-
-def detect_header(csv_path: str) -> bool:
-    # Tries to detect whether the first row looks like header
-    peek = pd.read_csv(csv_path, nrows=5)
-    cols = [c.lower() for c in peek.columns]
-    header_like = any(k in cols for k in ["user", "user_id"]) and any(
-        k in cols for k in ["item", "item_id", "business_id", "product_id"]
-    )
-    return header_like
-
-
-
-# -------------------------
 # Dataset
 # -------------------------
 class RatingsDataset(Dataset):
@@ -142,6 +95,11 @@ def train_one_epoch(
     for u, i, r in loader:
         u, i, r = u.to(device), i.to(device), r.to(device)
         out = model(u, i)
+        if torch.isnan(out).any() or torch.isinf(out).any():
+            print("NaN or Inf in model output")
+        if torch.isnan(r).any() or torch.isinf(r).any():
+            print("NaN or Inf in target rating")
+
         pred_loss = loss_fn(out, r)
         # L2 on embeddings only (common choice)
         l2 = (
@@ -163,6 +121,10 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, implici
     for u, i, r in loader:
         u, i, r = u.to(device), i.to(device), r.to(device)
         out = model(u, i)
+        if torch.isnan(out).any() or torch.isinf(out).any():
+            print("NaN or Inf in model output")
+        if torch.isnan(r).any() or torch.isinf(r).any():
+            print("NaN or Inf in target rating")
         all_out.append(out.detach().cpu())
         all_target.append(r.detach().cpu())
     out = torch.cat(all_out).numpy()
@@ -240,16 +202,16 @@ def prepare_tensors(
         global_bias_value = float(df_train["rating"].mean()) if len(df_train) else 0.0
         r_key = "rating"
 
-    u_train = df_train["u"].to_numpy(np.int64)
-    i_train = df_train["i"].to_numpy(np.int64)
+    u_train = df_train["user"].to_numpy(np.int64)
+    i_train = df_train["item"].to_numpy(np.int64)
     r_train = df_train[r_key].to_numpy(np.float32)
 
-    u_valid = df_valid["u"].to_numpy(np.int64)
-    i_valid = df_valid["i"].to_numpy(np.int64)
+    u_valid = df_valid["user"].to_numpy(np.int64)
+    i_valid = df_valid["item"].to_numpy(np.int64)
     r_valid = df_valid[r_key].to_numpy(np.float32) if len(df_valid) else np.array([], dtype=np.float32)
 
-    u_test = df_test["u"].to_numpy(np.int64)
-    i_test = df_test["i"].to_numpy(np.int64)
+    u_test = df_test["user"].to_numpy(np.int64)
+    i_test = df_test["item"].to_numpy(np.int64)
     r_test = df_test[r_key].to_numpy(np.float32) if len(df_test) else np.array([], dtype=np.float32)
 
     n_users = int(u_train.max()) + 1 if len(u_train) else 0
@@ -321,9 +283,48 @@ def split_valid_with_min_counts(
     return train_df, valid_df
 
 def main():
-    train_path = f"data/{args.dataset}/train_rating.txt"
-    test_path = f"data/{args.dataset}/test_rating.txt"
+    # main에서 import 하면서 기존 paser와 충돌나서 main 내부로 옮김
+    # -------------------------
+    # Global Settings
+    # -------------------------
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, required=False, help="Dataset name")
+    parser.add_argument("--dim", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=4096)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--l2", type=float, default=1e-5)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--valid_ratio", type=float, default=0.1)
+    parser.add_argument("--test_ratio", type=float, default=0.1)
+    parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
+    parser.add_argument("--implicit", action="store_true", help="whether to use implicit feedback")
+    parser.add_argument("--pos_threshold", type=float, default=4.0, help="rating >= threshold is positive in implicit mode")
+    args = parser.parse_args()
+
+    # -------------------------
+    # Utilities
+    # -------------------------
+    def set_seed(seed: int = 42):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    def detect_header(csv_path: str) -> bool:
+        # Tries to detect whether the first row looks like header
+        peek = pd.read_csv(csv_path, nrows=5)
+        cols = [c.lower() for c in peek.columns]
+        header_like = any(k in cols for k in ["user", "user_id"]) and any(
+            k in cols for k in ["item", "item_id", "business_id", "product_id"]
+        )
+        return header_like
+
     
+    train_path = f"../data/{args.dataset}/train_rating.txt"
+    test_path = f"../data/{args.dataset}/test_rating.txt"
+
     # 데이터는 (user, item, rating) 공백 구분 파일이라고 가정
     train_df = pd.read_table(train_path, header=None, names=["user", "item", "rating"], delim_whitespace=True)
     test_df = pd.read_table(test_path, header=None, names=["user", "item", "rating"], delim_whitespace=True)
@@ -346,6 +347,8 @@ def main():
         u_te, i_te, r_te,
         n_users, n_items, global_bias_value
     ) = prepare_tensors(train_df, valid_df, test_df, implicit=args.implicit, pos_threshold=args.pos_threshold)
+    
+    print(f"#users={n_users}  #items={n_items}  #interation={len(r_tr)+len(r_va)+len(r_te)}")
 
     print("Load datasets...")
     # Datasets / loaders
@@ -427,7 +430,11 @@ def main():
         print("[Warn] No test set generated (too few interactions per user).")
 
     # Save model
-    out_path = os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_dim{args.dim}.pt"
+    os.makedirs("LFM_checkpoints", exist_ok=True)
+    out_path = os.path.join(
+        "LFM_checkpoints",
+        os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_dim{args.dim}.pt"
+    )
     torch.save({"state_dict": model.state_dict(), "n_users": n_users, "n_items": n_items, "dim": args.dim}, out_path)
     print(f"[OK] Saved model to {out_path}")
 
