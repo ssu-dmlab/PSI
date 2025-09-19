@@ -32,7 +32,7 @@ Neg_k = 1
 # Load pretrained LFM
 if world.config['use_lfm'] == 1:
     print("Loading pretrained LFM...")
-    lfm_ckpt_path = "LFM_checkpoints/amazon-book_False_dim64.pt"
+    lfm_ckpt_path = "LFM_checkpoints/amazon-book_False_dim64.pt" # 추후 yaml으로 관리...
     lfm_ckpt = torch.load(lfm_ckpt_path, map_location=world.device)
     
     lfm_model = MFWithBias(
