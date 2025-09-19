@@ -95,11 +95,6 @@ def train_one_epoch(
     for u, i, r in loader:
         u, i, r = u.to(device), i.to(device), r.to(device)
         out = model(u, i)
-        if torch.isnan(out).any() or torch.isinf(out).any():
-            print("NaN or Inf in model output")
-        if torch.isnan(r).any() or torch.isinf(r).any():
-            print("NaN or Inf in target rating")
-
         pred_loss = loss_fn(out, r)
         # L2 on embeddings only (common choice)
         l2 = (
@@ -121,10 +116,6 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, implici
     for u, i, r in loader:
         u, i, r = u.to(device), i.to(device), r.to(device)
         out = model(u, i)
-        if torch.isnan(out).any() or torch.isinf(out).any():
-            print("NaN or Inf in model output")
-        if torch.isnan(r).any() or torch.isinf(r).any():
-            print("NaN or Inf in target rating")
         all_out.append(out.detach().cpu())
         all_target.append(r.detach().cpu())
     out = torch.cat(all_out).numpy()

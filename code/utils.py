@@ -38,9 +38,9 @@ class BPRLoss:
         self.lr = config['lr']
         self.opt = optim.Adam(recmodel.parameters(), lr=self.lr)
 
-    def stageOne(self, users, pos, neg, lfm_rating=None):
-        if lfm_rating is not None:
-            loss, reg_loss = self.model.bpr_loss(users, pos, neg, lfm_rating)
+    def stageOne(self, users, pos, neg, batch_ratings=None):
+        if batch_ratings is not None:
+            loss, reg_loss = self.model.bpr_loss(users, pos, neg, batch_ratings)
         else:
             loss, reg_loss = self.model.bpr_loss(users, pos, neg)
         reg_loss = reg_loss*self.weight_decay
@@ -51,6 +51,51 @@ class BPRLoss:
         self.opt.step()
 
         return loss.cpu().item()
+
+def SoftMaxSample(dataset, lfm_ratings, neg_ratio=1):
+    dataset : BasicDataset
+    allPos = dataset.allPos
+    if sample_ext:
+        S = sampling.sample_negative_lfm(dataset.n_users, dataset.m_items,
+                                     dataset.trainDataSize, allPos, lfm_ratings, neg_ratio)
+    else:
+        S = SoftMaxSample_python(dataset, lfm_ratings)
+    return S
+
+def SoftMaxSample_python(dataset, lfm_ratings, neg_ratio=1):
+    """
+    BPR Sampling in LightGCN with LFM softmax
+    :return:
+        np.array
+    """
+    user_num = dataset.trainDataSize
+    users = np.random.randint(0, dataset.n_users, user_num)
+    allPos = dataset.allPos
+    m_items = dataset.m_items
+    S = []
+
+    for user in users:
+        posForUser = allPos[user]
+        if len(posForUser) == 0:
+            continue
+        # pick one positive item
+        positem = np.random.choice(posForUser)
+
+        # softmax (pos는 이미 -inf로 되어 있음)
+        ratings = lfm_ratings[user]
+        probs = torch.softmax(ratings.float(), dim=0).cpu().numpy()
+
+        # negative sampling
+        negitem = np.random.choice(np.arange(dataset.m_items),
+                                    size=neg_ratio,
+                                    replace=False,
+                                    p=probs)
+        if negitem in posForUser:
+            print("warning: negative sample includes positem")
+
+        S.append([user, positem, negitem])
+
+    return np.array(S)
 
 
 def UniformSample_original(dataset, neg_ratio = 1):

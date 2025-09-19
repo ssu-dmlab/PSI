@@ -13,6 +13,8 @@ setup_pybind11(cfg)
 #include <random>
 #include <algorithm>
 #include <time.h>
+#include <cmath>
+#include <numeric>
 
 typedef unsigned int ui;
 
@@ -22,6 +24,31 @@ namespace py = pybind11;
 int randint_(int end)
 {
     return rand() % end;
+}
+
+std::vector<float> softmax_(const std::vector<float>& x) {
+    std::vector<float> exp_x(x.size());
+    for (size_t i = 0; i < x.size(); ++i) {
+        exp_x[i] = std::exp(x[i]);
+    }
+    float sum_exp = std::accumulate(exp_x.begin(), exp_x.end(), 0.0f);
+    for (size_t i = 0; i < exp_x.size(); ++i) {
+        exp_x[i] /= sum_exp;
+    }
+    return exp_x;
+}
+
+int sample_by_probs_(const std::vector<float>& probs) {
+    std::vector<float> cdf(probs.size());
+    float acc = 0.0f;
+    for (size_t i = 0; i < probs.size(); ++i) {
+        acc += probs[i];
+        cdf[i] = acc;
+    }
+    float u = static_cast<float>(rand()) / RAND_MAX * acc;
+
+    auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
+    return int(std::distance(cdf.begin(), it));
 }
 
 py::array_t<int> sample_negative(int user_num, int item_num, int train_num, std::vector<std::vector<int>> allPos, int neg_num)
@@ -48,6 +75,39 @@ py::array_t<int> sample_negative(int user_num, int item_num, int train_num, std:
                     negitem = randint_(item_num);
                 } while (
                     find(pos_item.begin(), pos_item.end(), negitem) != pos_item.end());
+                ptr[(user * perUserNum + pair_i) * row + index] = negitem;
+            }
+        }
+    }
+    return S_array;
+}
+
+py::array_t<int> sample_negative_lfm(int user_num, int item_num, int train_num, const std::vector<std::vector<int>>& allPos,
+                                     const std::vector<std::vector<float>>& lfm_ratings, int neg_num)
+{
+    int perUserNum = train_num / user_num;
+    int row = neg_num + 2;
+    py::array_t<int> S_array = py::array_t<int>({user_num * perUserNum, row});
+    py::buffer_info buf_S = S_array.request();
+    int* ptr = (int*)buf_S.ptr;
+
+    for (int user = 0; user < user_num; user++) 
+    {
+        const std::vector<int>& pos_item = allPos[user];
+
+        for (int pair_i = 0; pair_i < perUserNum; pair_i++) 
+        {
+            int negitem = 0;
+            ptr[(user * perUserNum + pair_i) * row] = user;
+            ptr[(user * perUserNum + pair_i) * row + 1] = pos_item[randint_(pos_item.size())];
+
+            std::vector<float> probs = softmax_(lfm_ratings[user]);
+            for (int index = 2; index < neg_num + 2; index++) 
+            {
+                do
+                {
+                    negitem = sample_by_probs_(probs);
+                } while (find(pos_item.begin(), pos_item.end(), negitem) != pos_item.end());
                 ptr[(user * perUserNum + pair_i) * row + index] = negitem;
             }
         }

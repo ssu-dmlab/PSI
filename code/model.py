@@ -188,7 +188,7 @@ class LightGCN(BasicModel):
         neg_emb_ego = self.embedding_item(neg_items)
         return users_emb, pos_emb, neg_emb, users_emb_ego, pos_emb_ego, neg_emb_ego
     
-    def bpr_loss(self, users, pos, neg, lfm_rating=None):
+    def bpr_loss(self, users, pos, neg, batch_ratings=None):
         (users_emb, pos_emb, neg_emb, 
         userEmb0,  posEmb0, negEmb0) = self.getEmbedding(users.long(), pos.long(), neg.long())
         reg_loss = (1/2)*(userEmb0.norm(2).pow(2) + 
@@ -199,8 +199,8 @@ class LightGCN(BasicModel):
         neg_scores = torch.mul(users_emb, neg_emb)
         neg_scores = torch.sum(neg_scores, dim=1)
         
-        if lfm_rating is not None:
-            loss = torch.mean(torch.log(1 + (torch.exp(neg_scores - pos_scores) / lfm_rating)))
+        if batch_ratings is not None:
+            loss = torch.mean(torch.log(1 + (torch.exp(neg_scores - pos_scores) / batch_ratings)))
         else:
             loss = torch.mean(torch.nn.functional.softplus(neg_scores - pos_scores))
         

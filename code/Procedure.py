@@ -23,13 +23,16 @@ from sklearn.metrics import roc_auc_score
 CORES = multiprocessing.cpu_count() // 2
 
 
-def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=None, lfm_model=None):
+def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=None, lfm_ratings=None):
     Recmodel = recommend_model
     Recmodel.train()
     bpr: utils.BPRLoss = loss_class
     
     with timer(name="Sample"):
-        S = utils.UniformSample_original(dataset)
+        if world.config['use_lfm'] == 1:
+            S = utils.SoftMaxSample(dataset, lfm_ratings)
+        else:
+            S = utils.UniformSample_original(dataset)
     users = torch.Tensor(S[:, 0]).long()
     posItems = torch.Tensor(S[:, 1]).long()
     negItems = torch.Tensor(S[:, 2]).long()
@@ -48,10 +51,10 @@ def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=N
                                                    negItems,
                                                    batch_size=world.config['bpr_batch_size'])):
         # lfm 예측값을 BPR loss에 활용
-        if lfm_model is not None:
+        if lfm_ratings is not None:
             with torch.no_grad():
-                lfm_rating = lfm_model(batch_users, batch_neg)
-            cri = bpr.stageOne(batch_users, batch_pos, batch_neg, lfm_rating)
+                batch_ratings = lfm_ratings[batch_users, batch_neg]
+            cri = bpr.stageOne(batch_users, batch_pos, batch_neg, batch_ratings)
         else:
             cri = bpr.stageOne(batch_users, batch_pos, batch_neg)
         
