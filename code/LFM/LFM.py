@@ -22,6 +22,35 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score
 from tqdm import tqdm
 
+from .model import MFWithBias
+
+# -------------------------
+# Utilities
+# -------------------------
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def factorize_series(s: pd.Series) -> Tuple[np.ndarray, Dict]:
+    """Return integer codes and mapping dict {original_id -> code}."""
+    codes, uniques = pd.factorize(s, sort=True)
+    mapping = {k: int(v) for v, k in enumerate(uniques.tolist())}
+    return codes.astype(np.int64), mapping
+
+
+def detect_header(csv_path: str) -> bool:
+    # Tries to detect whether the first row looks like header
+    peek = pd.read_csv(csv_path, nrows=5)
+    cols = [c.lower() for c in peek.columns]
+    header_like = any(k in cols for k in ["user", "user_id"]) and any(
+        k in cols for k in ["item", "item_id", "business_id", "product_id"]
+    )
+    return header_like
+
+
 
 # -------------------------
 # Dataset
@@ -37,37 +66,6 @@ class RatingsDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.u[idx], self.i[idx], self.r[idx]
-
-
-# -------------------------
-# Model
-# -------------------------
-class MFWithBias(nn.Module):
-    """
-    Rating_hat = mu + b_u + b_i + <P_u, Q_i>
-    where P: user embedding, Q: item embedding
-    """
-
-    def __init__(self, n_users: int, n_items: int, dim: int = 64, init_std: float = 0.01):
-        super().__init__()
-        self.user_factors = nn.Embedding(n_users, dim)
-        self.item_factors = nn.Embedding(n_items, dim)
-        self.user_bias = nn.Embedding(n_users, 1)
-        self.item_bias = nn.Embedding(n_items, 1)
-        self.global_bias = nn.Parameter(torch.zeros(1))
-        # init
-        nn.init.normal_(self.user_factors.weight, std=init_std)
-        nn.init.normal_(self.item_factors.weight, std=init_std)
-        nn.init.zeros_(self.user_bias.weight)
-        nn.init.zeros_(self.item_bias.weight)
-
-    def forward(self, u: torch.LongTensor, i: torch.LongTensor):
-        p_u = self.user_factors(u)          # (B, d)
-        q_i = self.item_factors(i)          # (B, d)
-        bu = self.user_bias(u).squeeze(-1)  # (B,)
-        bi = self.item_bias(i).squeeze(-1)  # (B,)
-        dot = (p_u * q_i).sum(dim=-1)       # (B,)
-        return self.global_bias + bu + bi + dot
 
 
 # -------------------------
@@ -274,51 +272,45 @@ def split_valid_with_min_counts(
     return train_df, valid_df
 
 def main():
-    # main에서 import 하면서 기존 paser와 충돌나서 main 내부로 옮김
     # -------------------------
     # Global Settings
     # -------------------------
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=False, help="Dataset name")
-    parser.add_argument("--dim", type=int, default=64)
-    parser.add_argument("--batch_size", type=int, default=4096)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--l2", type=float, default=1e-5)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--valid_ratio", type=float, default=0.1)
     parser.add_argument("--test_ratio", type=float, default=0.1)
-    parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
+
+    parser.add_argument("--dim", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--l2", type=float, default=1e-5)
+
+    parser.add_argument("--batch_size", type=int, default=4096)
+    parser.add_argument("--epochs", type=int, default=50)
+
     parser.add_argument("--implicit", action="store_true", help="whether to use implicit feedback")
     parser.add_argument("--pos_threshold", type=float, default=4.0, help="rating >= threshold is positive in implicit mode")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--patience", type=int, default=5, help="early stop patience (epochs)")
+
+    # Grid search and regularization options
+    parser.add_argument("--grid", action="store_true", help="run grid search over preset ranges")
+    parser.add_argument("--dims", type=str, default="16,32", help="comma-separated embedding dims for grid")
+    parser.add_argument("--lrs", type=str, default="3e-4,5e-4", help="comma-separated learning rates for grid")
+    parser.add_argument("--l2s", type=str, default="1e-3,3e-3,1e-2", help="comma-separated L2 values for grid")
+    parser.add_argument("--dropouts", type=str, default="0.0,0.2", help="comma-separated dropout rates for grid")
+    parser.add_argument("--clip_output", action="store_true", help="clip predictions to rating range via sigmoid scaling")
+    parser.add_argument("--rating_min", type=float, default=1.0, help="min rating for output clip")
+    parser.add_argument("--rating_max", type=float, default=5.0, help="max rating for output clip")
+    parser.add_argument("--save_best", action="store_true", help="save best model from grid search")
     args = parser.parse_args()
 
-    # -------------------------
-    # Utilities
-    # -------------------------
-    def set_seed(seed: int = 42):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-    def detect_header(csv_path: str) -> bool:
-        # Tries to detect whether the first row looks like header
-        peek = pd.read_csv(csv_path, nrows=5)
-        cols = [c.lower() for c in peek.columns]
-        header_like = any(k in cols for k in ["user", "user_id"]) and any(
-            k in cols for k in ["item", "item_id", "business_id", "product_id"]
-        )
-        return header_like
-
-    
-    train_path = f"../data/{args.dataset}/train_rating.txt"
-    test_path = f"../data/{args.dataset}/test_rating.txt"
+    train_path = f"data/{args.dataset}/train_rating.txt"
+    test_path = f"data/{args.dataset}/test_rating.txt"
 
     # 데이터는 (user, item, rating) 공백 구분 파일이라고 가정
-    train_df = pd.read_table(train_path, header=None, names=["user", "item", "rating"], delim_whitespace=True)
-    test_df = pd.read_table(test_path, header=None, names=["user", "item", "rating"], delim_whitespace=True)
+    train_df = pd.read_table(train_path, header=None, names=["user", "item", "rating"], sep=r"\s+")
+    test_df = pd.read_table(test_path, header=None, names=["user", "item", "rating"], sep=r"\s+")
 
     # train_df = pd.read_csv(f"data/processed/{args.dataset}_10core_train.csv")
     # test_df = pd.read_csv(f"data/processed/{args.dataset}_10core_test.csv")
@@ -351,83 +343,154 @@ def main():
     valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False) if valid_ds else None
     test_loader  = DataLoader(test_ds,  batch_size=args.batch_size, shuffle=False) if test_ds else None
 
-    # Model / optim
-    device = torch.device(args.device)
-    model = MFWithBias(n_users, n_items, dim=args.dim).to(device)
-    model.global_bias.data.fill_(global_bias_value)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # Utilities for grid search
+    def parse_list_str(s: str, cast):
+        return [cast(x.strip()) for x in s.split(",") if x.strip()]
 
-    # Train loop with early stopping
-    best_score = (-float("inf") if args.implicit else float("inf"))
-    best_state = None
-    patience = args.patience
-    no_improve = 0
-    print("Training...")
-    for epoch in tqdm(range(1, args.epochs + 1)):
-        train_loss = train_one_epoch(model, train_loader, opt, device, l2_reg=args.l2, implicit=args.implicit)
-        if valid_loader:
-            metrics = evaluate(model, valid_loader, device, implicit=args.implicit)
+    def run_experiment(dim: int, lr: float, l2_reg: float, dropout: float, clip_output: bool):
+        device = torch.device(args.device)
+        model = MFWithBias(
+            n_users,
+            n_items,
+            dim=dim,
+            dropout=dropout,
+            clip_output=(clip_output and not args.implicit),
+            rating_min=args.rating_min,
+            rating_max=args.rating_max,
+        ).to(device)
+        model.global_bias.data.fill_(global_bias_value)
+        opt = torch.optim.Adam(model.parameters(), lr=lr)
+
+        best_score = (-float("inf") if args.implicit else float("inf"))
+        best_state = None
+        no_improve = 0
+
+        for epoch in range(1, args.epochs + 1):
+            train_loss = train_one_epoch(model, train_loader, opt, device, l2_reg=l2_reg, implicit=args.implicit)
+            if valid_loader:
+                metrics = evaluate(model, valid_loader, device, implicit=args.implicit)
+                if args.implicit:
+                    val_auc = metrics.get("ROC_AUC", float("nan"))
+                    val_acc = metrics.get("ACC", float("nan"))
+                    cur_score = val_auc if not math.isnan(val_auc) else val_acc
+                else:
+                    cur_score = metrics.get("RMSE", float("nan"))
+                improved = (cur_score > best_score + 1e-6) if args.implicit else (cur_score < best_score - 1e-6)
+                if improved:
+                    best_score = cur_score
+                    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                    no_improve = 0
+                else:
+                    no_improve += 1
+                    if no_improve >= args.patience:
+                        break
+            # if no valid set, just keep training full epochs
+
+        if best_state is not None:
+            model.load_state_dict(best_state)
+
+        test_metrics = evaluate(model, test_loader, device, implicit=args.implicit) if test_loader else {}
+        valid_metrics = evaluate(model, valid_loader, device, implicit=args.implicit) if valid_loader else {}
+
+        return model.state_dict(), valid_metrics, test_metrics
+
+    # Grid or single run
+    if args.grid:
+        dims = parse_list_str(args.dims, int)
+        lrs = parse_list_str(args.lrs, float)
+        l2s = parse_list_str(args.l2s, float)
+        dropouts = parse_list_str(args.dropouts, float)
+        clip_opts = [args.clip_output, False] if args.clip_output else [False, True]
+
+        print("Training (grid search)...")
+        from itertools import product
+
+        results = []
+        for dim, lr, l2_reg, dropout, clip in product(dims, lrs, l2s, dropouts, clip_opts):
+            set_seed(args.seed)
+            state, v_metrics, t_metrics = run_experiment(dim, lr, l2_reg, dropout, clip)
             if args.implicit:
-                val_auc = metrics.get("ROC_AUC", float("nan"))
-                val_pr = metrics.get("PR_AUC", float("nan"))
-                val_acc = metrics.get("ACC", float("nan"))
-                val_bce = metrics.get("BCE", float("nan"))
-                print(f"[Epoch {epoch:02d}] train_BCE={train_loss:.5f}  val_ROC_AUC={val_auc:.5f}  val_PR_AUC={val_pr:.5f}  val_ACC={val_acc:.4f}  val_BCE={val_bce:.5f}")
-                # early stop: maximize ROC_AUC (fallback to ACC)
-                cur_score = val_auc if not math.isnan(val_auc) else val_acc
-                improved = cur_score > best_score + 1e-6
+                score = v_metrics.get("ROC_AUC", float("nan"))
+                score_str = f"val_ROC_AUC={score:.5f}"
             else:
-                val_rmse = metrics.get("RMSE", float("nan"))
-                val_mae = metrics.get("MAE", float("nan"))
-                val_mse = metrics.get("MSE", float("nan"))
-                print(f"[Epoch {epoch:02d}] train_MSE={train_loss:.5f}  val_RMSE={val_rmse:.5f}  val_MAE={val_mae:.5f}  val_MSE={val_mse:.5f}")
-                # early stop: minimize RMSE
-                cur_score = val_rmse
-                improved = cur_score < best_score - 1e-6
-            if improved:
-                best_score = cur_score
-                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-                no_improve = 0
-            else:
-                no_improve += 1
-                if no_improve >= patience:
-                    print(f"[EarlyStop] No improvement for {patience} epochs.")
-                    break
-        else:
-            if args.implicit:
-                print(f"[Epoch {epoch:02d}] train_BCE={train_loss:.5f}")
-            else:
-                print(f"[Epoch {epoch:02d}] train_MSE={train_loss:.5f}")
+                score = v_metrics.get("RMSE", float("inf"))
+                score_str = f"val_RMSE={score:.5f}"
+            print(f"dim={dim} lr={lr} l2={l2_reg} dropout={dropout} clip={clip} -> {score_str}")
+            results.append({
+                "config": {"dim": dim, "lr": lr, "l2": l2_reg, "dropout": dropout, "clip": clip},
+                "score": score,
+                "valid": v_metrics,
+                "test": t_metrics,
+                "state": state,
+            })
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
-    # Test
-    if test_loader:
-        test_metrics = evaluate(model, test_loader, device, implicit=args.implicit)
+        # Rank and report
         if args.implicit:
-            msg = (
-                f"[Test] ROC_AUC={test_metrics['ROC_AUC']:.5f}  "
-                f"PR_AUC={test_metrics['PR_AUC']:.5f}  "
-                f"ACC={test_metrics['ACC']:.4f}  BCE={test_metrics['BCE']:.5f}"
+            results.sort(key=lambda x: (-(x["score"]) if not math.isnan(x["score"]) else -float("inf")))
+        else:
+            results.sort(key=lambda x: (x["score"]))
+
+        best = results[0]
+        best_cfg = best["config"]
+        print("\n=== Top Results ===")
+        top_k = min(10, len(results))
+        for idx in range(top_k):
+            r = results[idx]
+            cfg = r["config"]
+            if args.implicit:
+                print(f"#{idx+1}: dim={cfg['dim']} lr={cfg['lr']} l2={cfg['l2']} dropout={cfg['dropout']} clip={cfg['clip']}  val_ROC_AUC={r['score']:.5f}")
+            else:
+                print(f"#{idx+1}: dim={cfg['dim']} lr={cfg['lr']} l2={cfg['l2']} dropout={cfg['dropout']} clip={cfg['clip']}  val_RMSE={r['score']:.5f}")
+
+        # Test of best
+        bv, bt = best["valid"], best["test"]
+        if args.implicit:
+            print(f"\n[Best-Valid] ROC_AUC={bv.get('ROC_AUC', float('nan')):.5f} PR_AUC={bv.get('PR_AUC', float('nan')):.5f} ACC={bv.get('ACC', float('nan')):.4f} BCE={bv.get('BCE', float('nan')):.5f}")
+            print(f"[Best-Test ] ROC_AUC={bt.get('ROC_AUC', float('nan')):.5f} PR_AUC={bt.get('PR_AUC', float('nan')):.5f} ACC={bt.get('ACC', float('nan')):.4f} BCE={bt.get('BCE', float('nan')):.5f}")
+        else:
+            print(f"\n[Best-Valid] RMSE={bv.get('RMSE', float('nan')):.5f} MAE={bv.get('MAE', float('nan')):.5f} MSE={bv.get('MSE', float('nan')):.5f}")
+            print(f"[Best-Test ] RMSE={bt.get('RMSE', float('nan')):.5f} MAE={bt.get('MAE', float('nan')):.5f} MSE={bt.get('MSE', float('nan')):.5f}")
+
+        
+        os.makedirs("LFM_checkpoints", exist_ok=True)
+        if args.implicit:
+            out_path = os.path.splitext("LFM_checkpoints/" + os.path.basename(args.dataset))[0] + f"_binary_grid_best_val{bv['ROC_AUC']:.4f}.pt"
+        else:
+            out_path = os.path.splitext("LFM_checkpoints/" + os.path.basename(args.dataset))[0] + f"_rating_grid_best_val{bv['RMSE']:.4f}.pt"
+        torch.save({
+            "state_dict": best["state"],
+            "n_users": n_users,
+            "n_items": n_items,
+            "dim": best_cfg["dim"],
+            "config": best_cfg,
+        }, out_path)
+        print(f"[OK] Saved best model to {out_path}")
+    else:
+        print("Training (single run)...")
+        set_seed(args.seed)
+        state, v_metrics, t_metrics = run_experiment(args.dim, args.lr, args.l2, 0.0, args.clip_output)
+        if args.implicit:
+            print(
+                f"[Valid] ROC_AUC={v_metrics.get('ROC_AUC', float('nan')):.5f}  PR_AUC={v_metrics.get('PR_AUC', float('nan')):.5f}  ACC={v_metrics.get('ACC', float('nan')):.4f}  BCE={v_metrics.get('BCE', float('nan')):.5f}"
+            )
+            print(
+                f"[Test ] ROC_AUC={t_metrics.get('ROC_AUC', float('nan')):.5f}  PR_AUC={t_metrics.get('PR_AUC', float('nan')):.5f}  ACC={t_metrics.get('ACC', float('nan')):.4f}  BCE={t_metrics.get('BCE', float('nan')):.5f}"
             )
         else:
-            msg = (
-                f"[Test] RMSE={test_metrics['RMSE']:.5f}  "
-                f"MAE={test_metrics['MAE']:.5f}  MSE={test_metrics['MSE']:.5f}"
+            print(
+                f"[Valid] RMSE={v_metrics.get('RMSE', float('nan')):.5f}  MAE={v_metrics.get('MAE', float('nan')):.5f}  MSE={v_metrics.get('MSE', float('nan')):.5f}"
             )
-        print(msg)
-    else:
-        print("[Warn] No test set generated (too few interactions per user).")
+            print(
+                f"[Test ] RMSE={t_metrics.get('RMSE', float('nan')):.5f}  MAE={t_metrics.get('MAE', float('nan')):.5f}  MSE={t_metrics.get('MSE', float('nan')):.5f}"
+            )
 
-    # Save model
-    os.makedirs("LFM_checkpoints", exist_ok=True)
-    out_path = os.path.join(
-        "LFM_checkpoints",
-        os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_dim{args.dim}.pt"
-    )
-    torch.save({"state_dict": model.state_dict(), "n_users": n_users, "n_items": n_items, "dim": args.dim}, out_path)
-    print(f"[OK] Saved model to {out_path}")
+        os.makedirs("LFM_checkpoints", exist_ok=True)
+        out_path = os.path.join(
+            "LFM_checkpoints",
+            os.path.splitext(os.path.basename(args.dataset))[0] + f"_{args.implicit}_dim{args.dim}.pt"
+        )
+        torch.save({"state_dict": state, "n_users": n_users, "n_items": n_items, "dim": args.dim}, out_path)
+        print(f"[OK] Saved model to {out_path}")
 
 
 if __name__ == "__main__":

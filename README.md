@@ -1,3 +1,33 @@
+## Improving negative sampling on recommendation
+
+### Experiments settings
+- 실험은 script 폴더 안의 .sh 를 이용해서 수행.
+    - 스크립트 예시
+    ```bash
+    #!/bin/bash
+    #SBATCH --gpus=1
+    #SBATCH --output=output/experiment_1
+
+    python -m code.LFM --dataset ...
+    ```
+    - 실행법
+    ```bash
+    >> pwd
+    /home/yourname/PSI
+    >> sbatch script/your_experiment.sh
+    ```
+- 필요에 따라 yaml 등을 활용해 arguments 관리
+- 실험결과는 output 디렉토리 아래에서 관리.
+    - 유의미한 실험은 수행 후 노션에서 별도로 설명을 달아놓기
+
+### 소스코드 내 파일 경로 지정법
+- 매번 실행 위치에 따라 파일 import 경로가 달라지는 불편함을 방지하기 위해 프로젝트 디렉토리에서 모듈로 실행할 경우 기준을 다음과 같은 상대경로로 통일할 수 있다.
+```python
+dataset = 'amazon-book'
+path = f'data/{dataset}/train.txt'
+```
+
+---
 #### An example to run a 3-layer LightGCN
 
 run LightGCN on **gowalla**, **amazon-book** dataset:
