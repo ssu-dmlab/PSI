@@ -217,57 +217,73 @@ def split_valid_with_min_counts(
     min_train_per_item: int = 1,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Split df into (train_df, valid_df) such that:
-    - No user/item becomes cold in validation relative to train
-    - Train retains at least min_train_per_user per user and min_train_per_item per item
-    The procedure first selects validation candidates per-user proportionally,
-    then adjusts to satisfy item minima. If constraints prevent reaching the
-    exact ratio, a smaller validation set is returned.
+    Capacitated split:
+    - Train에 모든 user/item이 남도록 (no cold-start)
+    - 각 user는 최소 min_train_per_user, 각 item은 최소 min_train_per_item 만큼 train에 잔류
+    - 위 두 제약을 동시에 만족하는 범위 내에서 valid_ratio에 최대한 가깝게 검증 세트를 선택
+    - 제약으로 인해 정확한 비율을 달성할 수 없으면 더 작은 validation을 반환
     """
     if len(df) == 0 or valid_ratio <= 0.0:
         return df.copy(), df.iloc[0:0].copy()
 
-    rng = np.random.RandomState(seed)
     d = df.copy().reset_index(drop=True)
     d["row_id"] = np.arange(len(d))
-
-    # Initial per-user selection
-    df_validask = np.zeros(len(d), dtype=bool)
-    user_groups = d.groupby("user").indices
-    for user_id, row_indices in user_groups.items():
-        n = len(row_indices)
-        max_take = max(0, n - min_train_per_user)
-        take = int(round(n * valid_ratio))
-        take = min(take, max_take)
-        if take <= 0:
-            continue
-        chosen = rng.choice(row_indices, size=take, replace=False)
-        df_validask[chosen] = True
-
-    # Enforce item minima by moving back from valid -> train if needed
+    rng = np.random.RandomState(seed)
+    before_user_counts = d["user"].nunique()
+    before_item_counts = d["item"].nunique()
+    # 1) 사용자/아이템 빈도와 "검증으로 보낼 수 있는 최대치(capacity)" 계산
+    user_counts = d["user"].value_counts()
     item_counts = d["item"].value_counts()
-    valid_item_counts = d.loc[df_validask, "item"].value_counts()
-    # For items where train would drop below min, move back some rows
-    items = item_counts.index.tolist()
-    for item_id in items:
-        total = int(item_counts.get(item_id, 0))
-        selected = int(valid_item_counts.get(item_id, 0))
-        train_left = total - selected
-        deficit = max(0, min_train_per_item - train_left)
-        if deficit <= 0:
-            continue
-        # Move back `deficit` rows for this item from valid to train (any rows)
-        item_valid_indices = d.index[(df_validask) & (d["item"] == item_id)].to_numpy()
-        if len(item_valid_indices) == 0:
-            continue
-        move_back_count = min(deficit, len(item_valid_indices))
-        to_move = rng.choice(item_valid_indices, size=move_back_count, replace=False)
-        df_validask[to_move] = False
-        # update counts for subsequent iterations
-        valid_item_counts[item_id] = int(valid_item_counts.get(item_id, 0)) - move_back_count
 
-    valid_df = d.loc[df_validask].drop(columns=["row_id"]).reset_index(drop=True)
-    train_df = d.loc[~df_validask].drop(columns=["row_id"]).reset_index(drop=True)
+    # 각 user u에 대해: valid로 최대 보낼 수 있는 수 = n_u - min_train_per_user (최소 0)
+    user_cap = (user_counts - min_train_per_user).clip(lower=0)
+    # 각 item i에 대해: valid로 최대 보낼 수 있는 수 = n_i - min_train_per_item (최소 0)
+    item_cap = (item_counts - min_train_per_item).clip(lower=0)
+
+    # 전역적으로 가능한 validation 상한 (두 cap의 합과 전체 목표 중 최소)
+    target = int(round(len(d) * valid_ratio))
+    max_feasible = int(min(user_cap.sum(), item_cap.sum()))
+    target = max(0, min(target, max_feasible))
+
+    if target == 0:
+        # 제약이 너무 타이트해 valid를 만들 수 없는 경우
+        train_df = d.drop(columns=["row_id"]).reset_index(drop=True)
+        valid_df = d.iloc[0:0].drop(columns=["row_id"])
+        return train_df, valid_df
+
+    # 2) 용량을 동시에 체크하며 무작위 순회 중 valid에 채택 (greedy)
+    #    같은 user/item에 대해 cap을 넘기지 않도록 선택
+    order = rng.permutation(len(d))
+    valid_mask = np.zeros(len(d), dtype=bool)
+
+    # 빠른 조회를 위해 딕셔너리 형태의 남은 용량 준비
+    user_left = user_cap.to_dict()
+    item_left = item_cap.to_dict()
+
+    picked = 0
+    # 빠른 접근을 위해 Series로
+    users = d["user"]
+    items = d["item"]
+
+    for idx in order:
+        if picked >= target:
+            break
+        u = users.iat[idx]
+        i = items.iat[idx]
+        # 해당 user/item에 남은 검증 용량이 있는지 확인
+        if user_left.get(u, 0) > 0 and item_left.get(i, 0) > 0:
+            valid_mask[idx] = True
+            user_left[u] -= 1
+            item_left[i] -= 1
+            picked += 1
+
+    # 3) 반환
+    valid_df = d.loc[valid_mask].drop(columns=["row_id"]).reset_index(drop=True)
+    train_df = d.loc[~valid_mask].drop(columns=["row_id"]).reset_index(drop=True)
+
+    # 안전 점검(선택): 제약 보장 확인
+    assert train_df["user"].nunique() == before_user_counts
+    assert train_df["item"].nunique() == before_item_counts
 
     return train_df, valid_df
 
